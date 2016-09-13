@@ -134,24 +134,10 @@ def main():
         sub.score_hi = (sub.vote_score_hi**2 - 0.25) * math.sqrt(sub.posts_per_day)
         sub.score_lo = (sub.vote_score_lo**2 - 0.25) * math.sqrt(sub.posts_per_day)
       else:
-        sub.vote_score_hi = -1.0
-        sub.vote_score_lo = -1.0
-        sub.score_hi = -1.0
-        sub.score_lo = -1.0
-
-    # Sort sub's by lo-score.
-    lo_subs = sorted(sub_dict.values(), key=lambda a: a.score_lo, reverse=True)
-
-    # Select subreddits, push to subscribed multi
-    num_pushed = 0
-    lowest_score = 1
-    for sub in lo_subs:
-      if sub.multi_display_name: continue
-      if num_pushed >= 45: break
-      if sub.nsfw != connection.nsfw: continue
-      num_pushed += 1
-      multi_dict['subscribed'].new_dict[sub.display_name] = sub
-      lowest_score = sub.score_lo
+        sub.vote_score_hi = -1
+        sub.vote_score_lo = -1
+        sub.score_hi = -1
+        sub.score_lo = -1
 
     # Sort sub's by hi-score.
     hi_subs = sorted(sub_dict.values(), key=lambda a: a.score_hi, reverse=True)
@@ -161,8 +147,7 @@ def main():
     for sub in hi_subs:
       if sub.multi_display_name: continue
       if sub.display_name in multi_dict['subscribed'].new_dict: continue
-      if num_pushed >= 5: break
-      if sub.score_hi < lowest_score: break
+      if num_pushed >= 49: break
       if sub.nsfw != connection.nsfw: continue
       num_pushed += 1
       multi_dict['subscribed'].new_dict[sub.display_name] = sub
@@ -188,7 +173,7 @@ def main():
     print 'Writing %d votes' % len(vote_dict)
     voteFileConnection.Write(vote_dict)
 
-    for sub in lo_subs:
+    for sub in hi_subs:
       print '%s: %s %.2f %.2f %.2f %.2f %.2f' % (
           sub.display_name, sub.nsfw, sub.score_lo, sub.score_hi,
           sub.posts_per_day, sub.vote_score_lo, sub.vote_score_hi)
