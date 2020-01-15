@@ -1,3 +1,4 @@
+import bz2
 import json
 import os
 
@@ -16,18 +17,31 @@ class _FileConnection(object):
       os.makedirs(self.directory_name)
 
     # Create file if it doesn't exist.
-    if not os.path.exists(file_path):
-      with open(file_path, 'w') as f:
-        f.write('[]')
+    if not os.path.exists(file_path + '.bz2'):
+      self._WriteToFile([])
+
+  def _WriteToFile(self, data_dict):
+    file_path = self.directory_name + self.file_name
+    data_json = json.dumps(data_dict, indent=2, sort_keys=True)
+
+    with bz2.BZ2File(file_path + '.bz2', 'wb') as f:
+      f.write(data_json)
+    
 
   def Read(self):
-    self._EnsureExistence()
     file_path = self.directory_name + self.file_name
 
-    with open(file_path, 'r') as f:
-      contents = json.load(f)
+    self._EnsureExistence()
 
-      return contents
+    try:
+      with bz2.BZ2File(file_path + '.bz2', 'r') as f:
+        raw_contents = f.read()
+        contents = json.loads(raw_contents)
+    except IOError:
+      with open(file_path, 'r') as f:
+        contents = json.load(f)
+
+    return contents
 
 class CredentialFileConnection(_FileConnection):
 
@@ -44,15 +58,12 @@ class SubFileConnection(_FileConnection):
 
   def Write(self, raw_data):
     self._EnsureExistence()
-    file_path = self.directory_name + self.file_name
 
     data = {}
     for key in raw_data:
       data[key] = raw_data[key].__dict__
 
-    with open(file_path, 'w') as f:
-      data_json = json.dumps(data, indent=2,sort_keys=True)
-      f.write(data_json)
+    self._WriteToFile(data)
 
 
 class VoteFileConnection(_FileConnection):
@@ -63,25 +74,25 @@ class VoteFileConnection(_FileConnection):
 
   def Write(self, raw_data):
     self._EnsureExistence()
-    file_path = self.directory_name + self.file_name
 
     sorted_votes = sorted(raw_data.values(), key=lambda a: a.created, reverse=True)
 
-    """
-    # Delete all but most recent 250 votes per sub.
+    # 256 votes is purely to keep storage size in check.
+    max_votes = 256
     vote_count = {}
+    sub_listing = set()
     deleted = 0
     for vote in sorted_votes:
       if vote.sr_fullname not in vote_count:
         vote_count[vote.sr_fullname] = 0
-      if vote_count[vote.sr_fullname] < 250:
+
+      if vote_count[vote.sr_fullname] < max_votes:
         vote_count[vote.sr_fullname] += 1
       else:
         del raw_data[vote.fullname]
         deleted += 1
 
-    sorted_votes = sorted(raw_data.values(), key=lambda a: a.created, reverse=True)
-
+    """
     # Delete all but most recent 25000 votes overall.
     total = 0
     for vote in sorted_votes:
@@ -90,14 +101,12 @@ class VoteFileConnection(_FileConnection):
       else:
         del raw_data[vote.fullname]
         deleted += 1
-
-    print 'Deleted %d votes' % deleted
     """
+    print 'Deleted %d votes' % deleted
 
     data = {}
     for key in raw_data:
       data[key] = raw_data[key].__dict__
 
-    with open(file_path, 'w') as f:
-      data_json = json.dumps(data, indent=True,sort_keys=True)
-      f.write(data_json)
+    self._WriteToFile(data)
+

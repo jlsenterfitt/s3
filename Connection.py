@@ -33,6 +33,9 @@ class Connection(object):
         'User-Agent': 'subreddit_picker:v0.0.1'}
     print 'OAuth received...'
 
+  def _DeleteRequest(self, *args, **kwargs):
+    return self._Request(requests.delete, *args, **kwargs)
+
   def _GetRequest(self, *args, **kwargs):
     return self._Request(requests.get, *args, **kwargs)
 
@@ -67,7 +70,6 @@ class Connection(object):
       wait = (float(self.time_left) ** 2) / (max(self.limit_left - 5, 1) ** 2)
       wait = max(wait - self.average_time, 0)
       wait = min(wait, self.time_left + 1)
-      ##print '%.2f, %d, %d, %.2f' % (wait, self.time_left, self.limit_left, self.average_time)
 
       time.sleep(wait)
 
@@ -139,6 +141,7 @@ class Connection(object):
       new_multi = MiscObjects.Multi()
 
       new_multi.display_name = child['data']['name']
+      new_multi.multipath = child['data']['path']
       for shallow_sub in child['data']['subreddits']:
         new_multi.current_list.append(shallow_sub['name'])
 
@@ -171,20 +174,67 @@ class Connection(object):
     return sub_list
 
   def GetSubData(self, sub):
-    request = 'https://oauth.reddit.com/r/%s/new?limit=100' % sub.display_name
-    response_json = self._GetRequest(request)
-
-    min = time.time() * 2
-    for child in response_json['data']['children']:
-      if child['data']['created'] - (8 * 60 * 60) < min:
-        min = child['data']['created'] - (8 * 60 * 60)
-    average_seconds_between = (time.time() - min) / 100.0
-    sub.posts_per_day = (3600 * 24) / average_seconds_between
-
-    if sub.nsfw is None:
-      request = 'https://oauth.reddit.com/r/%s/about' % sub.display_name
+    try:
+      request = 'https://oauth.reddit.com/r/%s/new?limit=100' % sub.display_name
       response_json = self._GetRequest(request)
-      sub.nsfw = response_json['data']['over18']
+
+      min = time.time() * 2
+      for child in response_json['data']['children']:
+        if child['data']['created'] - (8 * 60 * 60) < min:
+          min = child['data']['created'] - (8 * 60 * 60)
+      average_seconds_between = (time.time() - min) / 100.0
+      sub.posts_per_day = (3600 * 24) / average_seconds_between
+
+      if sub.nsfw is None:
+        request = 'https://oauth.reddit.com/r/%s/about' % sub.display_name
+        response_json = self._GetRequest(request)
+        sub.nsfw = response_json['data']['over18']
+
+      sub.last_updated = time.time()
+    except:
+      sub.last_updated = time.time()
+
+      if response_json == {u'message': u'Forbidden', u'error': 403}:
+        sub.posts_per_day = 0
+        sub.nsfw = False
+      elif response_json == {u'message': u'Not Found', u'error': 404}:
+        sub.posts_per_day = 0
+        sub.nsfw = False
+      elif response_json == {u'reason': u'banned', u'message': u'Not Found', u'error': 404}:
+        sub.posts_per_day = 0
+        sub.nsfw = False
+      elif response_json == {u'reason': u'private', u'message': u'Forbidden', u'error': 403}:
+        sub.posts_per_day = 0
+        sub.nsfw = False
+      else:
+        sub.posts_per_day = 0
+        sub.nsfw = False
+        print sub.display_name
+        print response_json
+
+  def UpdateMulti (self, multi, sub_dict):
+    for sub_old in multi.current_list:
+      for sub_key in sub_dict:
+        if sub_dict[sub_key].display_name == sub_old:
+          sub = sub_dict[sub_key]
+          break
+
+      if sub.display_name not in multi.new_dict:
+        request = 'https://oauth.reddit.com/api/multi/%s/r/%s' % (
+          multi.multipath, sub.display_name.lower())
+        print self._DeleteRequest(request)
+        print 'Removed %s from %s' % (sub.display_name, multi.display_name)
+      else:
+        print 'Keeping %s from %s' % (sub.display_name, multi.display_name)
+        del multi.new_dict[sub.display_name]
+
+    for display_name in multi.new_dict:
+      sub = multi.new_dict[display_name]
+      model = "{'name': %s}" % sub.display_name.lower()
+      request = 'https://oauth.reddit.com/api/multi/%s/r/%s?model=%s' % (
+        multi.multipath, sub.display_name.lower(), model)
+      print self._PutRequest(request, model=model)
+      print 'Added %s to %s' % (sub.display_name, multi.display_name)
 
   def UpdateSubscribed(self, multi, sub_dict):
     change_list = []
@@ -196,9 +246,9 @@ class Connection(object):
         request = 'https://oauth.reddit.com/api/subscribe?sr=%s&action=%s' % (
           sub.fullname, 'unsub')
         self._PostRequest(request)
-        change_list.append(['Removed %s' % sub.display_name, sub.score_lo, sub.score_hi])
+        change_list.append(['Removed %s' % sub.display_name, sub.posts_per_day, sub.vote_score_hi, sub.score_hi])
       else:
-        change_list.append(['Keeping %s' % sub.display_name, sub.score_lo, sub.score_hi])
+        change_list.append(['Keeping %s' % sub.display_name, sub.posts_per_day, sub.vote_score_hi, sub.score_hi])
         del multi.new_dict[sub.display_name]
 
     for display_name in multi.new_dict:
@@ -206,8 +256,8 @@ class Connection(object):
       request = 'https://oauth.reddit.com/api/subscribe?sr=%s&action=%s' % (
           sub.fullname, 'sub')
       self._PostRequest(request)
-      change_list.append(['Added %s' % sub.display_name, sub.score_lo, sub.score_hi])
+      change_list.append(['Added %s' % sub.display_name, sub.posts_per_day, sub.vote_score_hi, sub.score_hi])
 
-    change_list.sort(key=lambda a: a[1])
+    change_list.sort(key=lambda a: a[3])
     for change in change_list:
-      print '%.2f\t%.2f\t%s' % (change[1], change[2], change[0])
+      print '%.2f\t%.2f\t%.2f\t%s' % (change[2], change[1], change[3], change[0])

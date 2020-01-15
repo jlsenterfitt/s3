@@ -1,18 +1,27 @@
 """Code to automatically select subreddits."""
-import math
 import datetime
+import math
+import os
+import random
 
 import Connection
 import FileConnection
 import MiscObjects
 
+NUM_SUBS = 50
+
 def main():
+  # Update where we're working from.
+  # os.chdir("C:\Users\Justin\Google Drive\Notes\s3")
+
   # Open credential file.
   credentialFileConnection = FileConnection.CredentialFileConnection()
   credentials = credentialFileConnection.Read()
 
   for credential in credentials:
     username = credential['username']
+
+    NUM_SUBS = credential['size']
 
     connection = Connection.Connection(
         credential['client_id'],
@@ -31,6 +40,12 @@ def main():
     multi_dict = {}
     sub_dict = MiscObjects.SubredditMap()
     vote_dict = {}
+
+    # Merge in historical sub data.
+    sub_data = subFileConnection.Read()
+    print 'Read %d subs from file' % len(sub_data)
+    for key in sub_data:
+      sub_dict.Add(key, sub_data[key])
 
     # Read vote file, push data to sub and vote maps
     votes = voteFileConnection.Read()
@@ -83,17 +98,14 @@ def main():
       for sub_name in multi.current_list:
         for sub_key in sub_dict:
           if sub_dict[sub_key].display_name == sub_name:
-            sub_dict[sub_key].multi_display_name = multi.display_name
+            sub_dict[sub_key].multi_display_name.append(multi.display_name)
 
     # Get popular subs, push data to sub map
     popular_subs = connection.GetPopular()
-    num_added = 0
     for sub in popular_subs:
-      if num_added >= 5: break
       if sub.nsfw != connection.nsfw: continue
 
       if sub.fullname not in sub_dict:
-        num_added += 1
         sub_dict[sub.fullname] = sub
 
     # Add vote data to subs.
@@ -109,21 +121,27 @@ def main():
 
     # Finalize data for all subs.
     count = 0
-    for sub_key in sub_dict:
+    for sub_key in sorted(
+        sub_dict, key = lambda sub_key: sub_dict[sub_key].last_updated):
       sub = sub_dict[sub_key]
 
       count += 1
-      if count % 10 == 0:
+      # 10 chosen to ensure slow update of cache.
+      if count <= 10 or not sub.last_updated:
         print 'Getting missing data for %s (%d of %d)' % (sub.display_name, count, len(sub_dict))
-      connection.GetSubData(sub)
+        connection.GetSubData(sub)
 
       # Calculate score
       n = math.ceil(sub.upvotes + sub.downvotes)
+      if sub.posts_per_day > 0: ppd_mod = math.log10(sub.posts_per_day)
+      else: ppd_mod = 0
+
       if n:
         p = math.ceil(sub.upvotes) / n
-        z = 1.65
+        z = 2.576 # 99% CI
         z2 = z * z
 
+        # Wilson score interval.
         start = p + z2 / (2 * n)
         mod = z * math.sqrt((1.0 / n) * p * (1 - p) + z2 / (4 * n * n))
         div = (1 + z2 * (1.0 / n))
@@ -131,39 +149,67 @@ def main():
         sub.vote_score_hi = (start + mod) / div
         sub.vote_score_lo = (start - mod) / div
 
-        sub.score_hi = (sub.vote_score_hi**2 - 0.25) * math.sqrt(sub.posts_per_day)
-        sub.score_lo = (sub.vote_score_lo**2 - 0.25) * math.sqrt(sub.posts_per_day)
-      else:
-        sub.vote_score_hi = -1
-        sub.vote_score_lo = -1
-        sub.score_hi = -1
-        sub.score_lo = -1
+        # Ensure subs w/ < 50% don't get positive scores.
+        # Hi-volume bad subs could overwhelm low-volume good ones otherwise.
+        sub.score_hi = sub.vote_score_hi**2 * ppd_mod
+        sub.score_lo = sub.vote_score_lo**2 * ppd_mod
+        sub.score_random = random.triangular(sub.score_lo, sub.score_hi)
 
-    # Sort sub's by hi-score.
+        # New odds-based version of scoring.
+        if sub.vote_score_hi < 1.0:
+          sub.score_hi = (sub.vote_score_hi / (1 - sub.vote_score_hi)) * ppd_mod
+        else:
+          sub.score_hi = 100.0 * ppd_mod
+
+      else:
+        # 0.82 is wilson score(1 success, 2 trials) squared.
+        sub.vote_score_hi = 1.0 * ppd_mod
+        sub.vote_score_lo = 1.0 * ppd_mod
+        sub.score_hi = 100.0 * ppd_mod
+        sub.score_lo = 1.0 * ppd_mod
+        sub.score_random = 1.0 * ppd_mod
+
+    # Sort sub's.
     hi_subs = sorted(sub_dict.values(), key=lambda a: a.score_hi, reverse=True)
 
-    # Select subreddits, push to subscribed multi
-    num_pushed = 0
+    # Select subreddits on score, push to subscribed multi
     for sub in hi_subs:
-      if sub.multi_display_name: continue
+      if 'remove' in sub.multi_display_name: continue
       if sub.display_name in multi_dict['subscribed'].new_dict: continue
-      if num_pushed >= 49: break
+      if len(multi_dict['subscribed'].new_dict) >= NUM_SUBS: break
       if sub.nsfw != connection.nsfw: continue
-      num_pushed += 1
       multi_dict['subscribed'].new_dict[sub.display_name] = sub
 
     # Sort sub's by ppd.
     ppd_subs = sorted(sub_dict.values(), key=lambda a: a.posts_per_day, reverse=True)
 
-    # Select subreddits, push to subscribed multi
+    # Select subreddits on post per day, push to subscribed multi
     for sub in ppd_subs:
       if sub.nsfw != connection.nsfw: continue
       if sub.score_hi != -1: continue
-      if len(multi_dict['subscribed'].new_dict) >= 50: break
+      if len(multi_dict['subscribed'].new_dict) >= NUM_SUBS: break
       multi_dict['subscribed'].new_dict[sub.display_name] = sub
 
     # Remove outdated subs and add new subs.
     connection.UpdateSubscribed(multi_dict['subscribed'], sub_dict)
+
+    """
+    # Sort sub's by vote_score_hi.
+    vote_hi_subs = sorted(sub_dict.values(), key=lambda a: a.vote_score_hi, reverse=True)
+
+    # Fill vote_hi multi
+    print 'starting vote_hi'
+    for sub in vote_hi_subs:
+      if 'remove' in sub.multi_display_name: continue
+      if len(multi_dict['vote_hi'].new_dict) >= NUM_SUBS: break
+      if sub.nsfw != connection.nsfw: continue
+      if sub.posts_per_day < 1.0 / 7.0: continue
+      multi_dict['vote_hi'].new_dict[sub.display_name] = sub
+
+    # Remove outdated subs and add new subs.
+    connection.UpdateMulti(multi_dict['vote_hi'], sub_dict)
+    print 'ending vote_hi'
+    """
 
     # Export sub file.
     print 'Writing %d subs' % len(sub_dict)
@@ -173,10 +219,11 @@ def main():
     print 'Writing %d votes' % len(vote_dict)
     voteFileConnection.Write(vote_dict)
 
+    """
     for sub in hi_subs:
-      print '%s: %s %.2f %.2f %.2f %.2f %.2f' % (
-          sub.display_name, sub.nsfw, sub.score_lo, sub.score_hi,
-          sub.posts_per_day, sub.vote_score_lo, sub.vote_score_hi)
+      print '%s: %s %.2f %.2f' % (
+          sub.display_name, sub.nsfw, sub.posts_per_day, sub.vote_score_lo)
+    """
 
   print datetime.datetime.now()
 
@@ -184,3 +231,4 @@ def main():
 if __name__ == '__main__':
   print datetime.datetime.now()
   main()
+
